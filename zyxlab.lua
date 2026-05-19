@@ -2418,6 +2418,9 @@ return function()
         return controls
     end
 
+    local wallhopRaycastParams = RaycastParams.new()
+    wallhopRaycastParams.FilterType = Enum.RaycastFilterType.Blacklist
+
     local function getJumpValue()
         if not humanoid then return 50 end
         if humanoid.UseJumpPower then return humanoid.JumpPower end
@@ -5771,11 +5774,12 @@ local function setSmRemoteHack(state)
         smRemoteRef   = nil
         smTriggerSend = false
         smBlocking    = false
+        smRemoteHackThread = nil
         return
     end
+    if smRemoteHackThread then return end
     smRemoteRef = sm_getRemote()
     sm_hookBlock()
-    if smRemoteHackThread then return end
     smRemoteHackThread = task.spawn(function()
         while smRemoteHackOn do
             local active = sm_isTyping()
@@ -5819,9 +5823,7 @@ end
 local function setSmOpenExits(state)
     smOpenExitsOn = state
     if not state then
-        if smOpenExitsThread then
-            smOpenExitsThread = nil
-        end
+        smOpenExitsThread = nil
         return
     end
     if smOpenExitsThread then return end
