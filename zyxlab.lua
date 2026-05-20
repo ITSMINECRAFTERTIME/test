@@ -1,4 +1,4 @@
--- =============================================
+ablua file-- =============================================
 -- ███████╗██╗   ██╗██╗  ██╗██╗      █████╗ ██████╗
 -- ╚════██║╚██╗ ██╔╝╚██╗██╔╝██║     ██╔══██╗██╔══██╗
 --     ██╔╝ ╚████╔╝  ╚███╔╝ ██║     ███████║██████╔╝
@@ -756,8 +756,15 @@ end
 function writeConfig(name, stateTable, themeTable)
     if name == DEFAULT_CFG then return false end
     ensureDir()
-    local data = { state = {}, theme = deepCopy(themeTable) }
-    for k, v in pairs(stateTable) do data.state[k] = v end
+    local data = { state = {}, theme = {} }
+    for k, v in pairs(stateTable) do
+        if DEFAULT_STATE[k] ~= nil then data.state[k] = v end
+    end
+    for k, v in pairs(DEFAULT_THEME) do
+        local tv = themeTable[k]
+        if tv == nil then tv = v end
+        data.theme[k] = type(tv) == "table" and deepCopy(tv) or tv
+    end
     local ok = pcall(function()
         writefile(CFG_DIR .. name .. ".json", HttpService:JSONEncode(data))
     end)
@@ -818,16 +825,18 @@ function applyConfigData(cfg)
             theme[k] = type(v) == "table" and deepCopy(v) or v
         end
         for k, v in pairs(cfg.theme) do
-            if type(v) == "table" then
-                -- Merge into the existing slot to preserve newer fields like chroma flags
-                local slot = theme[k]
-                if type(slot) == "table" then
-                    for i, sv in pairs(v) do slot[i] = sv end
+            if DEFAULT_THEME[k] ~= nil then
+                if type(v) == "table" then
+                    -- Merge into the existing slot to preserve newer fields like chroma flags
+                    local slot = theme[k]
+                    if type(slot) == "table" then
+                        for i, sv in pairs(v) do slot[i] = sv end
+                    else
+                        theme[k] = deepCopy(v)
+                    end
                 else
-                    theme[k] = deepCopy(v)
+                    theme[k] = v
                 end
-            else
-                theme[k] = v
             end
         end
     end
@@ -845,13 +854,13 @@ do  -- 🔒 FEATURE_LOGIC section (scopes internal locals)
 -- ─── ANTI-ERROR ───
 local oldnc
 pcall(function()
-oldnc = hookmetamethod(game, "__namecall", newcclosure(function(name, ...)
+oldnc = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
     local Args = {...}
     if state.antierror and not checkcaller()
-    and tostring(name) == "RemoteEvent" and Args[1] == "SetPlayerMinigameResult" then
+    and tostring(self) == "RemoteEvent" and Args[1] == "SetPlayerMinigameResult" then
         Args[2] = true
     end
-    return oldnc(name, unpack(Args))
+    return oldnc(self, unpack(Args))
 end))
 end) -- end pcall for hookmetamethod
 
@@ -1346,6 +1355,7 @@ task.spawn(function()
 end)
 
 end  -- close ESP_MODULES section
+
 -- =============================================
 -- 📊 PROGRESS BAR  (pc_progress_esp v3)
 -- =============================================
@@ -5452,9 +5462,93 @@ do
     })
 end
 
--- =============================================
--- 🔥 RAGE PAGE
--- =============================================
+-- ─── LOUDER FOOTSTEPS ───
+do
+    local LOUD_SOUND_ID = "rbxassetid://118148067044773"
+    local loudEnabled   = false
+    local loudConns     = {}
+
+    local function setupCharacter(character)
+        local humanoid = character:WaitForChild("Humanoid", 10)
+        local root     = character:WaitForChild("HumanoidRootPart", 10)
+        if not humanoid or not root then return end
+
+        if root:FindFirstChild("LoudFootsteps") then
+            root.LoudFootsteps:Destroy()
+        end
+
+        local footstep = Instance.new("Sound")
+        footstep.Name               = "LoudFootsteps"
+        footstep.SoundId            = LOUD_SOUND_ID
+        footstep.Volume             = 0.8
+        footstep.RollOffMaxDistance = 60
+        footstep.RollOffMinDistance = 5
+        footstep.PlaybackSpeed      = 1.5
+        footstep.Looped             = true
+        footstep.Parent             = root
+
+        local playing = false
+        humanoid.Running:Connect(function(speed)
+            if not loudEnabled then
+                if playing then playing = false; footstep:Stop() end
+                return
+            end
+            local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
+            if speed > 2 and grounded then
+                if not playing then playing = true; footstep:Play() end
+                footstep.PlaybackSpeed = math.clamp(speed / 10, 1.3, 2)
+            else
+                if playing then playing = false; footstep:Stop() end
+            end
+        end)
+    end
+
+    local function setupPlayer(plr)
+        if plr.Character then task.spawn(setupCharacter, plr.Character) end
+        local conn = plr.CharacterAdded:Connect(setupCharacter)
+        loudConns[plr] = conn
+    end
+
+    local function teardownPlayer(plr)
+        local conn = loudConns[plr]
+        if conn then conn:Disconnect(); loudConns[plr] = nil end
+        local char = plr.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        local snd  = root and root:FindFirstChild("LoudFootsteps")
+        if snd then snd:Destroy() end
+    end
+
+    local function enableLoudFootsteps()
+        loudEnabled = true
+        for _, plr in ipairs(Players:GetPlayers()) do
+            setupPlayer(plr)
+        end
+        loudConns.__playerAdded = Players.PlayerAdded:Connect(setupPlayer)
+    end
+
+    local function disableLoudFootsteps()
+        loudEnabled = false
+        if loudConns.__playerAdded then
+            loudConns.__playerAdded:Disconnect()
+            loudConns.__playerAdded = nil
+        end
+        for plr in pairs(loudConns) do
+            if typeof(plr) == "Instance" then teardownPlayer(plr) end
+        end
+        loudConns = {}
+    end
+
+    miscPage:Section("Footsteps")
+
+    miscPage:Toggle({
+        Title = "Loud Footsteps",
+        Desc  = "Plays audible footsteps for all players — volume and speed scale with movement",
+        Value = false,
+        Callback = function(v)
+            if v then enableLoudFootsteps() else disableLoudFootsteps() end
+        end,
+    })
+end
 ragePage:Section("Olympia")
 
 toggleHandles.forcebeastability = ragePage:Toggle({
@@ -5675,168 +5769,210 @@ player.CharacterAdded:Connect(function()
     if jerkEnabled and hum then StartJerk(hum) end
 end)
 
--- ── Remote Hack & Remote Exit Door — Logic ──────────────────────────────────
+-- ══════════════════════════════════════════════════════════════════════════════
+-- REMOTE HACK & REMOTE EXIT DOORS
+-- Fully self-contained: own state, own __namecall hook chained on top of
+-- zyxlab's existing hook — identical to how sm_mini.lua works standalone.
+-- ══════════════════════════════════════════════════════════════════════════════
+local setSmRemoteHack, smOpenExitsOnce, setSmOpenExits  -- forward-declare for UI
+do
+    -- ── own state (no shared smState) ────────────────────────────────────────
+    local smHackOn      = false
+    local smHackThread  = nil
+    local smTriggerSend = false
+    local smBlocking    = false
+    local smRemoteRef   = nil
+    local smHookDone    = false
+    local smOld         = nil   -- captures zyxlab's hook when we chain on top
 
-local smRemoteHackOn      = false
-local smRemoteHackThread  = nil
-local smTriggerSend       = false
-local smBlocking          = false
-local smRemoteRef         = nil
-local smHookDone          = false
+    local smOpenExitsOn     = false
+    local smOpenExitsThread = nil
 
-local smOpenExitsOn       = false
-local smOpenExitsThread   = nil
+    -- ── helpers ──────────────────────────────────────────────────────────────
+    local function smGetRemote()
+        local ev = ReplicatedStorage:FindFirstChild("RemoteEvent")
+        if ev and ev:IsA("RemoteEvent") then return ev end
+    end
 
-local function sm_getRemote()
-    local ev = ReplicatedStorage:FindFirstChild("RemoteEvent")
-    if ev and ev:IsA("RemoteEvent") then return ev end
-end
+    local function smScanMap()
+        local cur = ReplicatedStorage:FindFirstChild("CurrentMap")
+        local val = cur and cur.Value
+        if typeof(val) == "Instance" then return val end
+        return typeof(val) == "string" and val ~= "" and workspace:FindFirstChild(val) or nil
+    end
 
-local function sm_scanMap()
-    local cur = ReplicatedStorage:FindFirstChild("CurrentMap")
-    local val = cur and cur.Value
-    if typeof(val) == "Instance" then return val end
-    return typeof(val) == "string" and val ~= "" and workspace:FindFirstChild(val) or nil
-end
+    local function smIsActive()
+        local v = ReplicatedStorage:FindFirstChild("IsGameActive")
+        return v and v:IsA("BoolValue") and v.Value == true
+    end
 
-local function sm_isActive()
-    local v = ReplicatedStorage:FindFirstChild("IsGameActive")
-    return v and v:IsA("BoolValue") and v.Value == true
-end
+    local function smGetStats()
+        return player:FindFirstChild("TempPlayerStatsModule")
+    end
 
-local function sm_localStats()
-    return player:FindFirstChild("TempPlayerStatsModule")
-end
+    local function smIsTyping()
+        local stats = smGetStats()
+        local anim  = stats and stats:FindFirstChild("CurrentAnimation")
+        return anim and anim:IsA("StringValue") and anim.Value == "Typing"
+    end
 
-local function sm_isTyping()
-    local stats = sm_localStats()
-    local anim  = stats and stats:FindFirstChild("CurrentAnimation")
-    return anim and anim:IsA("StringValue") and anim.Value == "Typing"
-end
+    local function smIsBeast()
+        local stats = smGetStats()
+        local ib    = stats and stats:FindFirstChild("IsBeast")
+        return ib and ib:IsA("BoolValue") and ib.Value == true
+    end
 
-local function sm_isBeast()
-    local stats = sm_localStats()
-    local ib    = stats and stats:FindFirstChild("IsBeast")
-    return ib and ib:IsA("BoolValue") and ib.Value == true
-end
+    local function smIsEscaped()
+        local stats = smGetStats()
+        local esc   = stats and stats:FindFirstChild("Escaped")
+        return esc and esc:IsA("BoolValue") and esc.Value == true
+    end
 
-local function sm_isEscaped()
-    local stats = sm_localStats()
-    local esc   = stats and stats:FindFirstChild("Escaped")
-    return esc and esc:IsA("BoolValue") and esc.Value == true
-end
-
-local function sm_exitLight(door)
-    return door:FindFirstChild("Light") or door:FindFirstChild("Light", true)
-end
-
-local function sm_exitOpen(door)
-    local light = sm_exitLight(door)
-    if not light then return false end
-    local ok, color = pcall(function() return light.Color end)
-    return ok and color == Color3.fromRGB(0, 255, 0)
-end
-
-local function sm_exitTriggerEvent(door)
-    local trigger = door:FindFirstChild("ExitDoorTrigger") or door:FindFirstChild("ExitDoorTrigger", true)
-    return trigger and (trigger:FindFirstChild("Event") or nil)
-end
-
-local function sm_fireRemoteAction(event)
-    local ev = sm_getRemote()
-    if not ev or not event then return false end
-    ev:FireServer("Input", "Trigger", true, event)
-    task.wait(0.3)
-    ev:FireServer("Input", "Action", true)
-    return true
-end
-
--- Manual Remote Hack — hook (integrates with existing oldnc hook gracefully)
-local function sm_hookBlock()
-    if smHookDone or not hookmetamethod or not getnamecallmethod then return end
-    smHookDone = true
-    local prev = oldnc  -- chain into zyxlab's existing __namecall hook
-    local fn = newcclosure(function(self, ...)
-        if smRemoteHackOn and smBlocking and self == smRemoteRef
-            and not smTriggerSend and getnamecallmethod() == "FireServer" then
-            local a1, a2 = ...
-            if a1 == "Input" and a2 == "Trigger" then return nil end
+    -- ── own hook (chained on top, exactly like sm_mini standalone) ───────────
+    -- smOld = whatever was the active __namecall handler before us
+    -- (zyxlab's anti-error hook → original).  Calling smOld preserves the chain.
+    local function installSmHook()
+        if smHookDone or not hookmetamethod or not newcclosure then return end
+        smHookDone = true
+        local fn = newcclosure(function(self, ...)
+            -- Block ALL Input/Trigger while hacking (true AND false),
+            -- except our own fires (guarded by smTriggerSend).
+            -- This is the exact sm_mini pattern.
+            if smHackOn and smBlocking and self == smRemoteRef
+                and not smTriggerSend then
+                local m = getnamecallmethod and getnamecallmethod()
+                if m == nil or m == "FireServer" then
+                    local a1, a2 = ...
+                    if a1 == "Input" and a2 == "Trigger" then
+                        return nil   -- drop: server never gets cancel/duplicate
+                    end
+                end
+            end
+            return smOld(self, ...)
+        end)
+        local ok, res = pcall(hookmetamethod, game, "__namecall", fn)
+        if ok then
+            smOld = res   -- smOld = zyxlab's anti-error hook; chain preserved
+        else
+            smHookDone = false
         end
-        return prev(self, ...)
-    end)
-    local ok, res = pcall(hookmetamethod, game, "__namecall", fn)
-    if ok then oldnc = res else smHookDone = false end
-end
+    end
 
-local function setSmRemoteHack(state)
-    smRemoteHackOn = state
-    if not state then
-        smRemoteRef   = nil
-        smTriggerSend = false
+    -- ── exit-door helpers ─────────────────────────────────────────────────────
+    local function smExitLight(door)
+        return door:FindFirstChild("Light") or door:FindFirstChild("Light", true)
+    end
+
+    local function smExitOpen(door)
+        local light = smExitLight(door)
+        if not light then return false end
+        local ok, color = pcall(function() return light.Color end)
+        return ok and color == Color3.fromRGB(0, 255, 0)
+    end
+
+    local function smExitTriggerEvent(door)
+        local t = door:FindFirstChild("ExitDoorTrigger")
+            or door:FindFirstChild("ExitDoorTrigger", true)
+        return t and t:FindFirstChild("Event") or nil
+    end
+
+    local function smFireRemoteAction(event)
+        local ev = smGetRemote()
+        if not ev or not event then return false end
+        pcall(function() ev:FireServer("Input", "Trigger", true, event) end)
+        task.wait(0.3)
+        pcall(function() ev:FireServer("Input", "Action", true) end)
+        return true
+    end
+
+    -- ── Manual Remote Hack ───────────────────────────────────────────────────
+    setSmRemoteHack = function(on)
+        smHackOn      = on
         smBlocking    = false
-        smRemoteHackThread = nil
-        return
-    end
-    if smRemoteHackThread then return end
-    smRemoteRef = sm_getRemote()
-    sm_hookBlock()
-    smRemoteHackThread = task.spawn(function()
-        while smRemoteHackOn do
-            local active = sm_isTyping()
-                and sm_isActive()
-                and not sm_isBeast()
-                and not sm_isEscaped()
-            smBlocking = active
-            if active then
-                local ev = smRemoteRef
-                if not ev or not ev:IsDescendantOf(game) then
-                    ev = sm_getRemote(); smRemoteRef = ev
-                end
-                if ev then
-                    local map = sm_scanMap()
-                    smTriggerSend = true
-                    if map then ev:FireServer("Input", "Trigger", true, map)
-                    else        ev:FireServer("Input", "Trigger", true) end
+        smTriggerSend = false
+        if not on then
+            smRemoteRef  = nil
+            smHackThread = nil
+            return
+        end
+        smRemoteRef = smGetRemote()
+        installSmHook()          -- install our hook once (smHookDone guards repeat)
+        if smHackThread then return end
+        smHackThread = task.spawn(function()
+            local hackLatched = false
+            while smHackOn do
+                local roundOk = smIsActive() and not smIsBeast() and not smIsEscaped()
+                if roundOk then
+                    -- Latch once the server confirms typing; stay latched for
+                    -- the whole round so other features writing CurrentAnimation=""
+                    -- (Auto Interact, PC Fast Hack…) cannot collapse the block.
+                    if not hackLatched and smIsTyping() then
+                        hackLatched = true
+                    end
+
+                    smBlocking = hackLatched
+
+                    if hackLatched then
+                        if not smRemoteRef or not smRemoteRef:IsDescendantOf(game) then
+                            smRemoteRef = smGetRemote()
+                        end
+                        local ev = smRemoteRef
+                        if ev then
+                            local map = smScanMap()
+                            -- triggerSend=true lets THIS fire past our own hook block.
+                            smTriggerSend = true
+                            pcall(function()
+                                if map then ev:FireServer("Input","Trigger",true,map)
+                                else        ev:FireServer("Input","Trigger",true) end
+                            end)
+                            smTriggerSend = false
+                            -- Action drives progress (on top of sm_mini's design).
+                            pcall(function() ev:FireServer("Input","Action",true) end)
+                        end
+                    end
+                    task.wait(0.25)
+                else
+                    hackLatched   = false
+                    smBlocking    = false
                     smTriggerSend = false
+                    task.wait(0.5)
                 end
-                task.wait(0.25)
-            else
-                task.wait(0.2)
+            end
+            hackLatched   = false
+            smBlocking    = false
+            smTriggerSend = false
+            smRemoteRef   = nil
+            smHackThread  = nil
+        end)
+    end
+
+    -- ── Remote Open Exit Doors ───────────────────────────────────────────────
+    smOpenExitsOnce = function()
+        local map = smScanMap()
+        if not map then return end
+        for _, obj in ipairs(map:GetChildren()) do
+            if obj.Name == "ExitDoor"
+                and obj:IsDescendantOf(workspace)
+                and not smExitOpen(obj) then
+                smFireRemoteAction(smExitTriggerEvent(obj))
+                task.wait(0.1)
             end
         end
-        smRemoteRef = nil; smTriggerSend = false; smBlocking = false
-        smRemoteHackThread = nil
-    end)
-end
-
-local function smOpenExitsOnce()
-    local map = sm_scanMap()
-    if not map then return end
-    for _, obj in ipairs(map:GetChildren()) do
-        if obj.Name == "ExitDoor" and obj:IsDescendantOf(workspace) and not sm_exitOpen(obj) then
-            sm_fireRemoteAction(sm_exitTriggerEvent(obj))
-            task.wait(0.1)
-        end
     end
-end
 
-local function setSmOpenExits(state)
-    smOpenExitsOn = state
-    if not state then
-        smOpenExitsThread = nil
-        return
-    end
-    if smOpenExitsThread then return end
-    smOpenExitsThread = task.spawn(function()
-        while smOpenExitsOn do
-            if sm_isActive() and not sm_isBeast() then
-                smOpenExitsOnce()
+    setSmOpenExits = function(state)
+        smOpenExitsOn = state
+        if not state then smOpenExitsThread = nil; return end
+        if smOpenExitsThread then return end
+        smOpenExitsThread = task.spawn(function()
+            while smOpenExitsOn do
+                if smIsActive() and not smIsBeast() then smOpenExitsOnce() end
+                task.wait(2)
             end
-            task.wait(2)
-        end
-        smOpenExitsThread = nil
-    end)
-end
+            smOpenExitsThread = nil
+        end)
+    end
+end -- end sm remote hack do-block
 
 -- ── Fun Page UI ────────────────────────────
 funPage:Section("Fun")
@@ -5946,12 +6082,12 @@ funPage:Toggle({
     end,
 })
 
-funPage:Toggle({
+funPage:Button({
     Title = "Remote Open Exit Doors",
-    Desc  = "Continuously fires all closed Exit Doors open every 2 seconds",
-    Value = false,
-    Callback = function(v)
-        pcall(function() setSmOpenExits(v) end)
+    Desc  = "Fires all closed Exit Doors open once",
+    Text  = "Open Exits",
+    Callback = function()
+        pcall(function() smOpenExitsOnce() end)
     end,
 })
 
@@ -10156,7 +10292,7 @@ configPage:Button({
         if state.doorESP      then applyDoorESP()   else clearDoorESP()   end
         if state.exitESP      then applyExitESP()   else clearExitESP()   end
         if state.freezepodESP then applyFreezeESP() else clearFreezeESP() end
-        if not state.computerESP then clearComputerESP() end
+            if not state.computerESP then clearComputerESP() end
         Olympia.setStreamerName(theme.streamerName or "Sigma")
         Olympia.setStreamerLevel(theme.streamerLevel or "67")
         Olympia.apply()
