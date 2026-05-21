@@ -11225,6 +11225,3 @@ Olympia.apply()
 pcall(function() ((getgenv and getgenv()) or _G).__ZyxLoadingFinish("Ready") end)
 
 print("[ZyxLab v4] Loaded — XovaModedLib UI · Made by ZyxFTF")
-
-end -- close do-end local register reset block
-
