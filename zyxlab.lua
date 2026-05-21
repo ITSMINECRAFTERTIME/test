@@ -11228,14 +11228,3 @@ print("[ZyxLab v4] Loaded — XovaModedLib UI · Made by ZyxFTF")
 
 end -- close do-end local register reset block
 
-
--- Lightweight grouped caches
-local ZyxLabCache = {
-    ESP = {},
-    Connections = {},
-    Computers = {},
-    Doors = {},
-    Players = {}
-}
-
-local ZyxLabToggles = {}
