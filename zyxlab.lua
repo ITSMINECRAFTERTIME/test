@@ -896,6 +896,27 @@ end  -- close FEATURE_STATE section
 -- =============================================
 do  -- 🔒 FEATURE_LOGIC section (scopes internal locals)
 
+-- ─── PROXIMITY SLOW BEAST ───
+local proximitySlowUI = nil
+local function toggleProximitySlow()
+    if not proximitySlowUI then
+        proximitySlowUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/your-repo/proximity_slow_beast.lua"))()
+    else
+        proximitySlowUI.Enabled = not proximitySlowUI.Enabled
+    end
+end
+
+-- Add this to the rage tab UI
+if not _G.__ZyxLabRageTab then _G.__ZyxLabRageTab = {} end
+table.insert(_G.__ZyxLabRageTab, {
+    name = "Proximity Slow Beast",
+    desc = "Spam slow beast when in proximity",
+    toggle = toggleProximitySlow,
+    default = false
+})
+
+-- ─── ANTI-ERROR ───
+
 -- ─── ANTI-ERROR ───
 local oldnc
 pcall(function()
@@ -1862,12 +1883,83 @@ task.spawn(function()
     end
 end)
 
+end
+
+-- Auto-refresh ESP when game:GetService("ReplicatedStorage").IsGameActive is true
+local function autoRefreshESP()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local isGameActive = ReplicatedStorage:FindFirstChild("IsGameActive")
+    if isGameActive then
+        isGameActive.Changed:Connect(function()
+            if isGameActive.Value then
+                -- Auto-refresh ESP when the game is active
+                if state.playerESP then
+                    clearPlayerESP()
+                    for _, plr in pairs(game:GetService("Players"):GetPlayers()) do
+                        if plr ~= player and plr.Character then
+                            applyPlayerHighlight(plr)
+                        end
+                    end
+                end
+                if state.doorESP then
+                    clearDoorESP()
+                    applyDoorESP()
+                end
+                if state.exitESP then
+                    clearExitESP()
+                    applyExitESP()
+                end
+                if state.computerESP then
+                    clearComputerESP()
+                    updateComputerESP()
+                end
+                if state.freezepodESP then
+                    clearFreezeESP()
+                    applyFreezeESP()
+                end
+            end
+        end)
+    end
+end
+
+task.spawn(autoRefreshESP)
+
 end  -- close ESP_MODULES section
 
 -- =============================================
 -- 📊 PROGRESS BAR  (pc_progress_esp v3)
 -- =============================================
 do  -- 🔒 PROGRESS_BAR section (scopes internal locals)
+
+-- Manual refresh function for progress ESP
+local function manualRefreshProgressESP()
+    clearESP_pb()
+    buildESP_pb()
+    startLoop_pb()
+end
+
+-- Add this to the visuals tab UI
+if not _G.__ZyxLabVisualsTab then _G.__ZyxLabVisualsTab = {} end
+table.insert(_G.__ZyxLabVisualsTab, {
+    name = "Refresh Progress ESP",
+    desc = "Manually refresh progress ESP",
+    action = manualRefreshProgressESP
+})
+
+-- Auto-refresh progress ESP by default
+local function autoRefreshProgressESP()
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local isGameActive = ReplicatedStorage:FindFirstChild("IsGameActive")
+    if isGameActive then
+        isGameActive.Changed:Connect(function()
+            if isGameActive.Value then
+                manualRefreshProgressESP()
+            end
+        end)
+    end
+end
+
+task.spawn(autoRefreshProgressESP)
 
     local LP_pb       = Players.LocalPlayer
     local SPlayers_pb = Players
