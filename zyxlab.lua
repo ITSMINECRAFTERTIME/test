@@ -550,7 +550,7 @@ local showBeastNotif, notifGui, beastNotifierReady, activatePCCrawlMobile, showB
 
 -- ESP MODULES
 local applyPlayerHighlight, clearPlayerESP
-local applyDoorESP, clearDoorESP
+local applyDoorESP, clearDoorESP, applySmartDoorESP, clearSmartDoorESP, refreshDoorEspMode
 local applyExitESP, clearExitESP, clearComputerESP
 local applyFreezeESP, clearFreezeESP
 local refreshProgressESP
@@ -721,10 +721,13 @@ DEFAULT_STATE = {
     beastnotify  = true,
     playerESP    = true,
     doorESP      = true,
+    smartdoorESP = false,
     exitESP      = true,
     computerESP  = true,
     freezepodESP = true,
     progressbar  = true,
+    ragdolltimer = false,
+    remotecapture = false,
     soundpack    = false,
     streamermode = false,
     nohammercooldown = false,
@@ -736,6 +739,7 @@ DEFAULT_STATE = {
     proximityslowdistance = 12,
     removerope = false,
     autosavecaptured = false,
+    autosaveonce = false,
     -- Features added to config system
     autointeract = false,
     pcfasthack   = false,
@@ -836,9 +840,9 @@ do  -- 🔒 FEATURE_STATE section (scopes internal locals)
 state = {
     antierror    = false, antiafk      = false, fullbright   = false,
     noslow       = false, antiseer     = false, beastnotify  = false,
-    playerESP    = false, doorESP      = false,
+    playerESP    = false, doorESP      = false, smartdoorESP = false,
     exitESP      = false, computerESP  = false,
-    freezepodESP = false, progressbar  = false,
+    freezepodESP = false, progressbar  = false, ragdolltimer = false, remotecapture = false,
     soundpack    = false,
     streamermode = false, nohammercooldown = false,
     silenthack   = false, autotie = false, hitaura = false, hitaurarange = 20,
@@ -846,6 +850,7 @@ state = {
     proximityslow = false, proximityslowdistance = 12,
     removerope   = false,
     autosavecaptured = false,
+    autosaveonce = false,
     -- Features added to config system
     autointeract  = false,
     pcfasthack    = false,
@@ -1590,10 +1595,14 @@ local function _doorEspScan()
     end
 end
 function applyDoorESP()
+    if state.smartdoorESP then
+        clearDoorESP()
+        return
+    end
     _doorEspScan()
     if not _doorEspConn then
         _doorEspConn = workspace.DescendantAdded:Connect(function(v)
-            if not state.doorESP then return end
+            if not state.doorESP or state.smartdoorESP then return end
             if (v.Name == "DoubleDoor" or v.Name == "SingleDoor") and not doorHighlights[v] then
                 local h = Instance.new("Highlight", v)
                 h.Enabled = true; h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
@@ -1625,7 +1634,7 @@ registerESPRefresh(refreshDoorColors)
 task.spawn(function()
     while true do
         -- CONFIG: skip workspace scan entirely when doorESP is off.
-        if state.doorESP then
+        if state.doorESP and not state.smartdoorESP then
             for d, h in pairs(doorHighlights) do
                 if not d or not d.Parent then if h then h:Destroy() end; doorHighlights[d] = nil end
             end
@@ -1634,6 +1643,175 @@ task.spawn(function()
         task.wait(1.5) -- reduced from 0.75s; stale cleanup doesn't need to be frequent
     end
 end)
+
+
+-- ─── SMART DOOR ESP (overrides regular Door ESP) ───
+local smartDoorHighlights = {}
+local smartDoorCache = {}
+local smartDoorModelSeen = {}
+local smartDoorConn = nil
+local smartDoorToken = 0
+local SMART_DOOR_MAX_DISTANCE = 60
+local SMART_DOOR_UPDATE_DELAY = 1
+
+local function _smartDoorAdd(model)
+    if not model or smartDoorModelSeen[model] then return end
+
+    if model.Name == "SingleDoor" and model:FindFirstChild("Door") then
+        smartDoorModelSeen[model] = true
+        table.insert(smartDoorCache, {
+            Type = "Single",
+            Model = model,
+            Object = model:FindFirstChild("Door")
+        })
+    elseif model.Name == "DoubleDoor" then
+        local part = model:FindFirstChildWhichIsA("BasePart", true)
+        if part then
+            smartDoorModelSeen[model] = true
+            table.insert(smartDoorCache, {
+                Type = "Double",
+                Model = model,
+                Object = model
+            })
+        end
+    end
+end
+
+local function _smartDoorBuildCache()
+    smartDoorCache = {}
+    smartDoorModelSeen = {}
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v.Name == "SingleDoor" or v.Name == "DoubleDoor" then
+            _smartDoorAdd(v)
+        end
+    end
+end
+
+local function _smartDoorGetPosition(obj)
+    if not obj then return nil end
+    if obj:IsA("BasePart") then
+        return obj.Position
+    end
+    local part = obj:FindFirstChildWhichIsA("BasePart", true)
+    return part and part.Position or nil
+end
+
+local function _smartDoorAddESP(obj)
+    if not obj then return nil end
+    local h = obj:FindFirstChild("ZyxSmartDoorESP")
+    if not h then
+        h = Instance.new("Highlight")
+        h.Name = "ZyxSmartDoorESP"
+        h.Enabled = true
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.FillTransparency = 0.4
+        h.OutlineTransparency = 1
+        h.Parent = obj
+    end
+    smartDoorHighlights[obj] = h
+    return h
+end
+
+local function _smartDoorRemoveESP(obj)
+    local h = obj and obj:FindFirstChild("ZyxSmartDoorESP")
+    if h then h:Destroy() end
+    smartDoorHighlights[obj] = nil
+end
+
+local function _smartDoorIsOpen(model)
+    local ok, value = pcall(function()
+        return model.DoorTrigger.ActionSign.Value == 11
+    end)
+    return ok and value == true
+end
+
+function clearSmartDoorESP()
+    smartDoorToken = smartDoorToken + 1
+    if smartDoorConn then
+        smartDoorConn:Disconnect()
+        smartDoorConn = nil
+    end
+    for obj, h in pairs(smartDoorHighlights) do
+        if h then h:Destroy() end
+        smartDoorHighlights[obj] = nil
+    end
+    for _, doorData in ipairs(smartDoorCache) do
+        _smartDoorRemoveESP(doorData.Object)
+    end
+end
+
+function applySmartDoorESP()
+    clearDoorESP()
+    clearSmartDoorESP()
+    _smartDoorBuildCache()
+
+    smartDoorToken = smartDoorToken + 1
+    local token = smartDoorToken
+
+    smartDoorConn = workspace.DescendantAdded:Connect(function(v)
+        if not state.smartdoorESP then return end
+        if v.Name == "SingleDoor" or v.Name == "DoubleDoor" then
+            task.defer(function()
+                _smartDoorAdd(v)
+            end)
+        end
+    end)
+
+    task.spawn(function()
+        while state.smartdoorESP and token == smartDoorToken do
+            local char = player.Character
+            local root = char and char:FindFirstChild("HumanoidRootPart")
+
+            if root then
+                for i = #smartDoorCache, 1, -1 do
+                    local doorData = smartDoorCache[i]
+                    local obj = doorData and doorData.Object
+                    local model = doorData and doorData.Model
+
+                    if not obj or not model or not model.Parent then
+                        if obj then _smartDoorRemoveESP(obj) end
+                        table.remove(smartDoorCache, i)
+                    else
+                        local pos = _smartDoorGetPosition(obj)
+                        if pos then
+                            local dist = (root.Position - pos).Magnitude
+                            if dist <= SMART_DOOR_MAX_DISTANCE then
+                                local h = _smartDoorAddESP(obj)
+                                if h then
+                                    if _smartDoorIsOpen(model) then
+                                        h.FillColor = Color3.fromRGB(0, 255, 0)
+                                    else
+                                        h.FillColor = Color3.fromRGB(255, 0, 0)
+                                    end
+                                end
+                            else
+                                _smartDoorRemoveESP(obj)
+                            end
+                        else
+                            _smartDoorRemoveESP(obj)
+                        end
+                    end
+                end
+            end
+
+            task.wait(SMART_DOOR_UPDATE_DELAY)
+        end
+    end)
+end
+
+function refreshDoorEspMode()
+    if state.smartdoorESP then
+        clearDoorESP()
+        applySmartDoorESP()
+    else
+        clearSmartDoorESP()
+        if state.doorESP then
+            applyDoorESP()
+        else
+            clearDoorESP()
+        end
+    end
+end
 
 -- ─── EXIT ESP ───
 local exitHighlights = {}
@@ -5219,7 +5397,17 @@ toggleHandles.doorESP = visualsPage:Toggle({
     Value = state.doorESP,
     Callback = function(v)
         state.doorESP = v
-        if v then applyDoorESP() else clearDoorESP() end
+        refreshDoorEspMode()
+    end,
+})
+
+toggleHandles.smartdoorESP = visualsPage:Toggle({
+    Title = "Smart Door ESP",
+    Desc  = "Green = open/useable, red = closed. Overrides regular Door ESP while enabled.",
+    Value = state.smartdoorESP,
+    Callback = function(v)
+        state.smartdoorESP = v
+        refreshDoorEspMode()
     end,
 })
 
@@ -5262,7 +5450,7 @@ visualsPage:Button({
             clearPlayerESP()
             for _, p in pairs(game:GetService("Players"):GetPlayers()) do applyPlayerHighlight(p) end
         end
-        if state.doorESP      then clearDoorESP();      applyDoorESP()      end
+        refreshDoorEspMode()
         if state.exitESP      then clearExitESP();      applyExitESP()      end
         if state.freezepodESP then clearFreezeESP();    applyFreezeESP()    end
         if state.computerESP  then clearComputerESP()                       end
@@ -5301,7 +5489,7 @@ task.spawn(function()
                 clearPlayerESP()
                 for _, p in pairs(game:GetService("Players"):GetPlayers()) do applyPlayerHighlight(p) end
             end
-            if state.doorESP      then clearDoorESP();      applyDoorESP()      end
+            refreshDoorEspMode()
             if state.exitESP      then clearExitESP();      applyExitESP()      end
             if state.freezepodESP then clearFreezeESP();    applyFreezeESP()    end
             if state.computerESP  then clearComputerESP()                       end
@@ -6109,30 +6297,267 @@ toggleHandles.autotie = miscPage:Toggle({
 do
     local LP_aura  = Players.LocalPlayer
 
-    local hitAuraEnabled = false; local hitAuraRange   = state.hitaurarange or 10
-    local autoTieEnabled = false; local tiePlayerRange = 5
+    -- Hit Range Aura v3.0 logic from the supplied txt file.
+    -- UI controls below are kept as ZyxLab's existing Misc tab controls.
+    local HitAuraState = {
+        Enabled       = false,
+        HitRange      = state.hitaurarange or 10,
+        Transparency  = 1,
+        Color         = Color3.fromRGB(0, 255, 255),
+        ChromaEnabled = false,
+        ChromaSpeed   = 1,
+        _hue = 0.5,
+        _sat = 1,
+        _val = 1,
+    }
+
+    local hitAuraConn = nil
+    local _targetState = {} -- [player] = { wasInRange = bool, lastFire = tick() }
+    local _vel = {} -- kept from Hit Range Aura v3.0 velocity-cache state
+
+    local autoTieEnabled = false
+    local tiePlayerRange = 5
+
+    -- Internal burst per Heartbeat tick while in range — scaled to HitRange
+    -- Higher range = fewer bursts needed; tight edge = more.
+    local function getBurst()
+        local range = math.clamp(HitAuraState.HitRange, 2, 20)
+        if range <= 6 then return 14
+        elseif range <= 10 then return 12
+        elseif range <= 16 then return 10
+        else return 8 end
+    end
+
+    local function clampHitRange(value)
+        local n = tonumber(value) or HitAuraState.HitRange or 10
+        return math.clamp(n, 2, 20)
+    end
+
+    local function getPing()
+        if LP_aura and LP_aura.GetNetworkPing then
+            local ping = LP_aura:GetNetworkPing()
+            if type(ping) == "number" and ping > 0 then
+                return math.clamp(ping, 0.03, 0.5)
+            end
+        end
+
+        return 0.12
+    end
+
+    local function getVelocity(root)
+        if not root then
+            return Vector3.zero
+        end
+
+        local vel = root.AssemblyLinearVelocity
+        if vel and typeof(vel) == "Vector3" then
+            return vel
+        end
+
+        vel = root.Velocity
+        if vel and typeof(vel) == "Vector3" then
+            return vel
+        end
+
+        return Vector3.zero
+    end
+
+    local function predictPosition(root, extraTime)
+        if not root then
+            return Vector3.zero, Vector3.zero
+        end
+
+        local pos = root.Position
+        local vel = getVelocity(root)
+        local predicted = pos + vel * math.clamp(extraTime, 0.02, 0.8)
+        return pos, predicted
+    end
+
+    local function getCompensatedSize(root, ping)
+        if not root then
+            return Vector3.new(1, 1, 1)
+        end
+
+        local vel = getVelocity(root)
+        local extra = math.clamp((ping * 2.8) + (vel.Magnitude * 0.2) + 4.2, 4.2, 12.5)
+        return root.Size + Vector3.new(extra, extra, extra)
+    end
+
+    local function boxesOverlap(centerA, sizeA, centerB, sizeB)
+        local halfA = sizeA * 0.5
+        local halfB = sizeB * 0.5
+
+        return math.abs(centerA.X - centerB.X) <= (halfA.X + halfB.X)
+            and math.abs(centerA.Y - centerB.Y) <= (halfA.Y + halfB.Y)
+            and math.abs(centerA.Z - centerB.Z) <= (halfA.Z + halfB.Z)
+    end
+
+    local function getMyAggressiveBox(root)
+        if not root then
+            return Vector3.zero, Vector3.new(1, 1, 1)
+        end
+
+        local base = root.Size + Vector3.new(4.5, 4.5, 4.5)
+        return root.Position, base
+    end
+
+    local function isBeast()
+        local stats = LP_aura:FindFirstChild("TempPlayerStatsModule")
+        local b = stats and stats:FindFirstChild("IsBeast")
+        return b and b.Value == true
+    end
+
+    local function getTargetParts(char)
+        local parts = {}
+        if not char then return parts end
+
+        local root = char:FindFirstChild("HumanoidRootPart")
+        if root then table.insert(parts, root) end
+
+        for _, name in ipairs({
+            "Head",
+            "UpperTorso", "LowerTorso",
+            "LeftUpperArm", "RightUpperArm",
+            "LeftLowerArm", "RightLowerArm",
+            "LeftHand", "RightHand",
+            "LeftUpperLeg", "RightUpperLeg",
+            "LeftLowerLeg", "RightLowerLeg",
+            "LeftFoot", "RightFoot"
+        }) do
+            local part = char:FindFirstChild(name)
+            if part and part ~= root then table.insert(parts, part) end
+        end
+
+        for _, name in ipairs({
+            "Head",
+            "Torso",
+            "Left Arm", "Right Arm",
+            "Left Leg", "Right Leg"
+        }) do
+            local part = char:FindFirstChild(name)
+            if part and part ~= root then table.insert(parts, part) end
+        end
+
+        return parts
+    end
+
+    local function isValidTarget(targetPlayer)
+        local stats = targetPlayer:FindFirstChild("TempPlayerStatsModule")
+        local ragdoll = stats and stats:FindFirstChild("Ragdoll")
+        local captured = stats and stats:FindFirstChild("Captured")
+        return ragdoll and captured and not ragdoll.Value and not captured.Value
+    end
+
+    local function clearHitAuraTargetState()
+        for k in pairs(_targetState) do
+            _targetState[k] = nil
+        end
+    end
+
+    local function stopHitAura()
+        HitAuraState.Enabled = false
+        if hitAuraConn then
+            hitAuraConn:Disconnect()
+            hitAuraConn = nil
+        end
+        clearHitAuraTargetState()
+    end
 
     local function startHitAura()
-        task.spawn(function()
-            while hitAuraEnabled and task.wait(0.15) do
-                pcall(function()
-                    local LPC = LP_aura.Character
-                    local LPR = LPC and LPC:FindFirstChild("HumanoidRootPart")
-                    local LHE = LPC and LPC:FindFirstChild("HammerEvent", true)
-                    if not (LPC and LPR and LHE) then return end
-                    for _, p in pairs(game:GetService("Players"):GetPlayers()) do
-                        if p == LP_aura then continue end
-                        local S = p:FindFirstChild("TempPlayerStatsModule"); if not S then continue end
-                        local R = S:FindFirstChild("Ragdoll"); local C = S:FindFirstChild("Captured")
-                        if R and C and not (R.Value or C.Value) then
-                            local root = p.Character and p.Character:FindFirstChild("HumanoidRootPart")
-                            if root and (root.Position - LPR.Position).Magnitude <= hitAuraRange then
-                                LHE:FireServer("HammerHit", root)
-                            end
-                        end
+        if hitAuraConn then
+            hitAuraConn:Disconnect()
+            hitAuraConn = nil
+        end
+
+        HitAuraState.Enabled = true
+        clearHitAuraTargetState()
+
+        hitAuraConn = RunService.Heartbeat:Connect(function()
+            if not HitAuraState.Enabled then return end
+
+            pcall(function()
+                local myChar = LP_aura.Character
+                if not myChar then return end
+
+                local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+                if not myRoot then return end
+
+                local myPos = myRoot.Position
+                local hammerEvent = myChar:FindFirstChild("HammerEvent", true)
+                if not hammerEvent then return end
+
+                local beast = isBeast()
+                local now = tick()
+                local hitRange = clampHitRange(HitAuraState.HitRange)
+                local burst = getBurst()
+
+                for _, p in ipairs(Players:GetPlayers()) do
+                    if p == LP_aura then
+                        continue
                     end
-                end)
-            end
+
+                    local targetState = _targetState[p] or { wasInRange = false, lastFire = 0 }
+                    local pChar = p.Character
+                    local pRoot = pChar and pChar:FindFirstChild("HumanoidRootPart")
+
+                    if not pRoot then
+                        targetState.wasInRange = false
+                        _targetState[p] = targetState
+                        continue
+                    end
+
+                    local expandedSize = hitRange
+                    if (pRoot.Position - myPos).Magnitude < 8 then
+                        expandedSize = hitRange * 1.35
+                    end
+
+                    pRoot.Size         = Vector3.new(expandedSize, expandedSize, expandedSize)
+                    pRoot.Transparency = 1
+                   -- pRoot.Color        = HitAuraState.Color
+                   -- pRoot.Material     = Enum.Material.Neon
+                    pRoot.CanCollide   = false
+
+                    if not isValidTarget(p) then
+                        targetState.wasInRange = false
+                        _targetState[p] = targetState
+                        continue
+                    end
+
+                    local ping = getPing()
+                    local myCurrent, myPredicted = predictPosition(myRoot, ping + 0.35)
+                    local targetCurrent, targetPredicted = predictPosition(pRoot, ping + 0.35)
+                    local _, myAggressiveSize = getMyAggressiveBox(myRoot)
+                    local targetSize = getCompensatedSize(pRoot, ping)
+
+                    local currentlyInRange = boxesOverlap(myCurrent, myAggressiveSize, targetCurrent, targetSize)
+                        or boxesOverlap(myPredicted, myAggressiveSize, targetCurrent, targetSize)
+                        or boxesOverlap(myCurrent, myAggressiveSize, targetPredicted, targetSize)
+                        or boxesOverlap(myPredicted, myAggressiveSize, targetPredicted, targetSize)
+
+                    if currentlyInRange then
+                        local entered = not targetState.wasInRange
+                        targetState.wasInRange = true
+                        targetState.lastSeen = now
+
+                        local shouldFire = true
+
+                        if shouldFire then
+                            for _, targetPart in ipairs(getTargetParts(p.Character)) do
+                                for i = 1, burst do
+                                    pcall(function()
+                                        hammerEvent:FireServer("HammerHit", targetPart)
+                                    end)
+                                end
+                            end
+                            targetState.lastFire = now
+                        end
+                    else
+                        targetState.wasInRange = false
+                    end
+
+                    _targetState[p] = targetState
+                end
+            end)
         end)
     end
 
@@ -6165,9 +6590,12 @@ do
         Desc  = "Auto-hit players in range [Beast only]",
         Value = state.hitaura,
         Callback = function(v)
-            state.hitaura  = v
-            hitAuraEnabled = v
-            if v then startHitAura() end
+            state.hitaura = v
+            if v then
+                startHitAura()
+            else
+                stopHitAura()
+            end
         end,
     })
 
@@ -6179,9 +6607,13 @@ do
         Value    = state.hitaurarange,
         Callback = function(v)
             state.hitaurarange = v
-            hitAuraRange       = v
+            HitAuraState.HitRange = clampHitRange(v)
         end,
     })
+
+    if state.hitaura then
+        startHitAura()
+    end
 
     miscPage:Toggle({
         Title = "Tie Aura",
@@ -6255,6 +6687,179 @@ do
             end
         end,
     })
+end
+
+-- ─── RAGDOLL TIMER ───
+do
+    local ragdollTimerConn = nil
+    local ragdollRemovingConn = nil
+    local ragdollESPs = {}
+    local ragdollStorage = nil
+    local RAGDOLL_TIMER_DURATION = 28
+
+    local function getRagdollStorage()
+        if ragdollStorage and ragdollStorage.Parent then
+            return ragdollStorage
+        end
+
+        ragdollStorage = workspace:FindFirstChild("ZyxLab_RagdollTimerStorage")
+        if not ragdollStorage then
+            ragdollStorage = Instance.new("Folder")
+            ragdollStorage.Name = "ZyxLab_RagdollTimerStorage"
+            ragdollStorage.Parent = workspace
+        end
+
+        return ragdollStorage
+    end
+
+    local function clearRagdollTimerESP()
+        for _, esp in pairs(ragdollESPs) do
+            pcall(function()
+                if esp.Gui then
+                    esp.Gui:Destroy()
+                end
+            end)
+        end
+        ragdollESPs = {}
+    end
+
+    local function removeRagdollTimerESP(plr)
+        local esp = ragdollESPs[plr]
+        if esp then
+            pcall(function()
+                if esp.Gui then
+                    esp.Gui:Destroy()
+                end
+            end)
+            ragdollESPs[plr] = nil
+        end
+    end
+
+    local function createRagdollTimerESP(plr)
+        local cached = ragdollESPs[plr]
+        if cached and cached.Gui and cached.Gui.Parent then
+            return cached
+        end
+
+        removeRagdollTimerESP(plr)
+
+        local billboard = Instance.new("BillboardGui")
+        billboard.Name = "ZyxLab_RagdollTimer"
+        billboard.Size = UDim2.new(0, 86, 0, 22)
+        billboard.StudsOffset = Vector3.new(0, 3.2, 0)
+        billboard.AlwaysOnTop = true
+        billboard.Enabled = false
+        billboard.Parent = getRagdollStorage()
+
+        local label = Instance.new("TextLabel")
+        label.Name = "TimerLabel"
+        label.Size = UDim2.new(1, 0, 1, 0)
+        label.BackgroundTransparency = 1
+        label.Text = "0%"
+        label.TextScaled = true
+        label.TextStrokeTransparency = 0
+        label.TextColor3 = getEffectiveAccent and getEffectiveAccent() or Color3.fromRGB(0, 255, 255)
+        label.Font = Enum.Font.GothamBold
+        label.Visible = false
+        label.Parent = billboard
+
+        ragdollESPs[plr] = {
+            Gui = billboard,
+            Label = label,
+            Progress = 0,
+        }
+
+        return ragdollESPs[plr]
+    end
+
+    local function startRagdollTimer()
+        if ragdollTimerConn then
+            ragdollTimerConn:Disconnect()
+            ragdollTimerConn = nil
+        end
+        if ragdollRemovingConn then
+            ragdollRemovingConn:Disconnect()
+            ragdollRemovingConn = nil
+        end
+
+        clearRagdollTimerESP()
+
+        ragdollRemovingConn = Players.PlayerRemoving:Connect(function(plr)
+            removeRagdollTimerESP(plr)
+        end)
+
+        ragdollTimerConn = RunService.RenderStepped:Connect(function(dt)
+            if not state.ragdolltimer then return end
+
+            pcall(function()
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= player then
+                        local char = plr.Character
+                        local stats = plr:FindFirstChild("TempPlayerStatsModule")
+                        local ragdoll = stats and stats:FindFirstChild("Ragdoll")
+                        local head = char and char:FindFirstChild("Head")
+
+                        if head and ragdoll then
+                            local esp = createRagdollTimerESP(plr)
+                            esp.Gui.Adornee = head
+                            esp.Label.TextColor3 = getEffectiveAccent and getEffectiveAccent() or Color3.fromRGB(0, 255, 255)
+
+                            if ragdoll.Value then
+                                esp.Progress = math.clamp(
+                                    (esp.Progress or 0) + (dt * (100 / RAGDOLL_TIMER_DURATION)),
+                                    0,
+                                    100
+                                )
+
+                                esp.Gui.Enabled = true
+                                esp.Label.Visible = true
+                                esp.Label.Text = tostring(math.floor(esp.Progress + 0.5)) .. "%"
+                            else
+                                esp.Progress = 0
+                                esp.Gui.Enabled = false
+                                esp.Label.Visible = false
+                            end
+                        else
+                            local esp = ragdollESPs[plr]
+                            if esp and esp.Gui then
+                                esp.Gui.Enabled = false
+                            end
+                        end
+                    end
+                end
+            end)
+        end)
+    end
+
+    local function stopRagdollTimer()
+        if ragdollTimerConn then
+            ragdollTimerConn:Disconnect()
+            ragdollTimerConn = nil
+        end
+        if ragdollRemovingConn then
+            ragdollRemovingConn:Disconnect()
+            ragdollRemovingConn = nil
+        end
+        clearRagdollTimerESP()
+    end
+
+    toggleHandles.ragdolltimer = miscPage:Toggle({
+        Title = "Ragdoll Timer",
+        Desc  = "Shows a 28-second timer above ragdolled players",
+        Value = state.ragdolltimer,
+        Callback = function(v)
+            state.ragdolltimer = v
+            if v then
+                startRagdollTimer()
+            else
+                stopRagdollTimer()
+            end
+        end,
+    })
+
+    if state.ragdolltimer then
+        startRagdollTimer()
+    end
 end
 
 -- ─── ANTI RAGDOLL ───
@@ -7189,6 +7794,134 @@ do
     end
 end -- end sm remote hack do-block
 
+
+-- ── Remote Capture (integrated from remote_capture_toggle.txt) ───────────────
+-- Uses ZyxLab's Fun tab UI only. No separate ScreenGui/button is created.
+local rcCaptureEnabled = false
+local rcCaptureThread = nil
+local rcCaptureToken = 0
+
+local function rcGetMap()
+    local cm = ReplicatedStorage:FindFirstChild("CurrentMap")
+    local okValue, currentMap = pcall(function()
+        return cm and cm.Value
+    end)
+    if okValue and currentMap then
+        return currentMap
+    end
+
+    for _, v in pairs(workspace:GetChildren()) do
+        if v:FindFirstChild("FreezePod") then
+            return v
+        end
+    end
+
+    return workspace
+end
+
+local function rcGetDownedSurvivors()
+    local downed = {}
+
+    for _, targetPlayer in pairs(Players:GetPlayers()) do
+        if targetPlayer ~= player then
+            local stats = targetPlayer:FindFirstChild("TempPlayerStatsModule")
+            if stats then
+                local isBeast = stats:FindFirstChild("IsBeast")
+                    and stats.IsBeast.Value == true
+                local isRagdoll = stats:FindFirstChild("Ragdoll")
+                    and stats.Ragdoll.Value == true
+                local isCaptured = stats:FindFirstChild("Captured")
+                    and stats.Captured.Value == true
+
+                if not isBeast and isRagdoll and not isCaptured then
+                    table.insert(downed, targetPlayer)
+                end
+            end
+        end
+    end
+
+    return downed
+end
+
+local function rcRemoteCaptureOnce()
+    local remoteEvent = ReplicatedStorage:FindFirstChild("RemoteEvent")
+    if not remoteEvent then return false end
+
+    local map = rcGetMap()
+    if not map then return false end
+
+    for _, pod in pairs(map:GetChildren()) do
+        if pod.Name == "FreezePod" then
+            local podTrigger = pod:FindFirstChild("PodTrigger")
+            if podTrigger then
+                local capturedTorso = podTrigger:FindFirstChild("CapturedTorso")
+                local podEvent = podTrigger:FindFirstChild("Event")
+
+                if capturedTorso and podEvent then
+                    local emptyPod = false
+                    pcall(function()
+                        emptyPod = capturedTorso.Value == nil
+                    end)
+
+                    if emptyPod then
+                        local downed = rcGetDownedSurvivors()
+                        if #downed > 0 then
+                            local target = downed[1]
+                            local targetRoot = target.Character
+                                and target.Character:FindFirstChild("HumanoidRootPart")
+
+                            if targetRoot then
+                                pcall(function()
+                                    capturedTorso.Value = targetRoot
+                                end)
+                                pcall(function()
+                                    remoteEvent:FireServer("Input", "Trigger", true, podEvent)
+                                end)
+                                pcall(function()
+                                    remoteEvent:FireServer("Input", "Action", true)
+                                end)
+                                return true
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+local function rcSetRemoteCapture(on)
+    rcCaptureEnabled = on == true
+    rcCaptureToken = rcCaptureToken + 1
+    local token = rcCaptureToken
+
+    if not rcCaptureEnabled then
+        rcCaptureThread = nil
+        return
+    end
+
+    if rcCaptureThread then
+        return
+    end
+
+    rcCaptureThread = task.spawn(function()
+        while rcCaptureEnabled and token == rcCaptureToken do
+            pcall(rcRemoteCaptureOnce)
+            task.wait(0.2)
+        end
+        if token == rcCaptureToken then
+            rcCaptureThread = nil
+        end
+    end)
+end
+
+if state.remotecapture then
+    pcall(function() rcSetRemoteCapture(true) end)
+end
+
+
 -- ── Fun Page UI ────────────────────────────
 funPage:Section("Fun")
 
@@ -7279,6 +8012,17 @@ funPage:Slider({
 })
 
 funPage:Section("Remote Tools")
+
+
+funPage:Toggle({
+    Title = "Remote Capture",
+    Desc  = "Auto-captures the first ragdolled survivor into an empty FreezePod",
+    Value = state.remotecapture,
+    Callback = function(v)
+        state.remotecapture = v
+        pcall(function() rcSetRemoteCapture(v) end)
+    end,
+})
 
 funPage:Toggle({
     Title = "Remote Hack + Anti-Fail",
@@ -7690,6 +8434,18 @@ do
         Value = state.autosavecaptured,
         Callback = function(v)
             state.autosavecaptured = v
+        end,
+    })
+
+    toggleHandles.autosaveonce = autofarmsPage:Toggle({
+        Title = "Save Once [Remote]",
+        Desc  = "Remote-saves one occupied FreezePod per match, then waits for the next round",
+        Value = state.autosaveonce,
+        Callback = function(v)
+            state.autosaveonce = v
+            if v and _G.__ZyxAutoSaveOnceReset then
+                pcall(_G.__ZyxAutoSaveOnceReset)
+            end
         end,
     })
 
@@ -10923,6 +11679,108 @@ task.spawn(function()
     end
 end)
 
+-- ─── SAVE ONCE [REMOTE] LOOP ───
+-- Same remote-save idea as Auto Save Captured, but it only fires once per match.
+do
+    local saveOnceCount = 0
+    local lastGameActive = false
+    local gameFlagConn = nil
+
+    local function getGameFlag()
+        return ReplicatedStorage:FindFirstChild("IsGameActive")
+    end
+
+    local function gameIsActive()
+        local flag = getGameFlag()
+        if not flag then return true end
+        local ok, value = pcall(function() return flag.Value end)
+        return ok and value == true
+    end
+
+    local function attachGameFlagListener()
+        if gameFlagConn then return end
+        local flag = getGameFlag()
+        if not flag then return end
+        gameFlagConn = flag.Changed:Connect(function(isActive)
+            if isActive then
+                saveOnceCount = 0
+            end
+        end)
+    end
+
+    local function findCurrentMap()
+        local currentMap = ReplicatedStorage:FindFirstChild("CurrentMap")
+        if currentMap and currentMap.Value then
+            return currentMap.Value
+        end
+
+        for _, v in pairs(workspace:GetChildren()) do
+            if v:FindFirstChild("ComputerTable") or v:FindFirstChild("FreezePod") then
+                return v
+            end
+        end
+
+        return nil
+    end
+
+    local function trySaveOnce()
+        if saveOnceCount >= 1 or not state.autosaveonce or not gameIsActive() then
+            return
+        end
+
+        local remoteEvent = ReplicatedStorage:FindFirstChild("RemoteEvent")
+        if not remoteEvent then return end
+
+        local map = findCurrentMap()
+        if not map then return end
+
+        for _, pod in pairs(map:GetChildren()) do
+            if saveOnceCount >= 1 or not state.autosaveonce or not gameIsActive() then
+                break
+            end
+
+            if pod.Name == "FreezePod" then
+                local podTrigger = pod:FindFirstChild("PodTrigger", true)
+                local capturedTorso = podTrigger and podTrigger:FindFirstChild("CapturedTorso")
+                local event = podTrigger and podTrigger:FindFirstChild("Event")
+
+                if capturedTorso and capturedTorso.Value and event then
+                    saveOnceCount = 1
+
+                    pcall(function()
+                        remoteEvent:FireServer("Input", "Trigger", true, event)
+                        remoteEvent:FireServer("Input", "Action", true)
+                    end)
+
+                    break
+                end
+            end
+        end
+    end
+
+    _G.__ZyxAutoSaveOnceReset = function()
+        saveOnceCount = 0
+        lastGameActive = gameIsActive()
+    end
+
+    task.spawn(function()
+        while true do
+            task.wait(0.2)
+            attachGameFlagListener()
+
+            local active = gameIsActive()
+            if active and not lastGameActive then
+                saveOnceCount = 0
+            end
+            lastGameActive = active
+
+            if state.autosaveonce then
+                pcall(trySaveOnce)
+            end
+        end
+    end)
+end
+
 -- =============================================
 -- 👁️ SPECTATE PAGE
 -- =============================================
@@ -12405,7 +13263,7 @@ local function applyLoadedConfig(name)
     if state.playerESP then
         for _, p in pairs(game:GetService("Players"):GetPlayers()) do applyPlayerHighlight(p) end
     else clearPlayerESP() end
-    if state.doorESP      then applyDoorESP()   else clearDoorESP()   end
+    refreshDoorEspMode()
     if state.exitESP      then applyExitESP()   else clearExitESP()   end
     if state.freezepodESP then applyFreezeESP() else clearFreezeESP() end
     if not state.computerESP then clearComputerESP() end
@@ -12503,7 +13361,7 @@ configPage:Button({
         if state.playerESP then
             for _, p in pairs(game:GetService("Players"):GetPlayers()) do applyPlayerHighlight(p) end
         else clearPlayerESP() end
-        if state.doorESP      then applyDoorESP()   else clearDoorESP()   end
+        refreshDoorEspMode()
         if state.exitESP      then applyExitESP()   else clearExitESP()   end
         if state.freezepodESP then applyFreezeESP() else clearFreezeESP() end
         if not state.computerESP then clearComputerESP() end
@@ -12674,6 +13532,7 @@ local function setupFeatureSearch(pageRegistry)
     local items = {
         {page = "Visuals", feature = "Player ESP"},
         {page = "Visuals", feature = "Door ESP"},
+        {page = "Visuals", feature = "Smart Door ESP"},
         {page = "Visuals", feature = "Exit ESP"},
         {page = "Visuals", feature = "Computer ESP"},
         {page = "Visuals", feature = "FreezePod ESP"},
@@ -12707,6 +13566,7 @@ local function setupFeatureSearch(pageRegistry)
         {page = "Misc", feature = "No Hammer Cooldown"},
         {page = "Misc", feature = "Silent Hack"},
         {page = "Misc", feature = "Auto Tie"},
+        {page = "Misc", feature = "Ragdoll Timer"},
         {page = "Misc", feature = "Fix Camera"},
         {page = "Misc", feature = "FixCam"},
         {page = "Misc", feature = "Rejoin"},
@@ -12716,11 +13576,13 @@ local function setupFeatureSearch(pageRegistry)
         {page = "Rage", feature = "Remove Rope"},
         {page = "Fun", feature = "Bang"},
         {page = "Fun", feature = "Jerk"},
+        {page = "Fun", feature = "Remote Capture"},
         {page = "Fun", feature = "Remote Hack"},
         {page = "Fun", feature = "Remote Open Exit Doors"},
         {page = "End Game", feature = "Activate End Game"},
         {page = "Autofarms", feature = "Autofarm Beast"},
         {page = "Autofarms", feature = "Auto Save Captured"},
+        {page = "Autofarms", feature = "Save Once"},
         {page = "Spectate", feature = "Spectate Survivor"},
         {page = "Spectate", feature = "Spectate Beast"},
         {page = "Audio", feature = "Custom Soundpack"},
@@ -13820,7 +14682,7 @@ if state.soundpack    then refreshSoundpack()  end
 if state.playerESP    then
     for _, p in pairs(game:GetService("Players"):GetPlayers()) do applyPlayerHighlight(p) end
 end
-if state.doorESP      then applyDoorESP()      end
+refreshDoorEspMode()
 if state.exitESP      then applyExitESP()      end
 if state.freezepodESP then applyFreezeESP()    end
 if state.pccrawl      then activatePCCrawlMobile() end
