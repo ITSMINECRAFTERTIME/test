@@ -2371,14 +2371,17 @@ end  -- close SOUNDPACK section
 do
 _G.__ZyxAudioPlayerPopupSource = [====[
 -- ZyxLab Audio Player Popup (lazy-loaded separate chunk, no boost/custom asset)
-
+-- This source runs through loadstring(), so it must define its own service locals.
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
 local RunService = game:GetService("RunService")
 local SoundService = game:GetService("SoundService")
 local UIS = game:GetService("UserInputService")
 
-local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
+local player = Players.LocalPlayer
+if not player then
+    player = Players.PlayerAdded:Wait()
+end
 
 local function getParent()
     local ok, hui = pcall(function() return gethui and gethui() end)
