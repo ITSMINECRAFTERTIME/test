@@ -5608,6 +5608,589 @@ end
 -- =============================================
 miscPage:Section("Gameplay")
 
+local HAMMER_BACK_C0 = CFrame.new(0,0,0, -0.707134247,0.707079291,0, 0.707079291,0.707134247,0, 0,0,-1)
+local HAMMER_BACK_C1 = CFrame.new(0,0,0.5)
+local GEM_BACK_C0    = CFrame.new(0.400000006,0,0.699999988, -1,0,0, 0,0,1, 0,1,0)
+local GEM_BACK_C1    = CFrame.new(0,0,0.5)
+local HAMMER_HIP_C0  = CFrame.new(-0.1,0.3,0, -0.908693194,-0.166089237,-0.383002877, -0.13302651,-0.754422903,0.642767489, -0.395702899,0.635027945,0.663444638)
+local HAMMER_HIP_C1  = CFrame.new(-1,-1,0)
+local GEM_HIP_C0     = CFrame.new(0.4,0.1,-0.1, 1,0,0, 0,0,-1, 0,1,0)
+local GEM_HIP_C1     = CFrame.new(1,-1,-0.5)
+
+local function InventorySpoof_Activate()
+    if _G.__ZyxInventorySpoofActivated then
+        return false, "Inventory Spoof already activated."
+    end
+    _G.__ZyxInventorySpoofActivated = true
+
+    local SReplicatedStorage = ReplicatedStorage
+    local SPlayers           = Players
+    local SWorkspace         = workspace
+    local STweenService      = TweenService
+
+    local LP  = player
+    local LPC = LP.Character or LP.CharacterAdded:Wait()
+    LP.CharacterAdded:Connect(function(c) LPC = c end)
+
+    local RemoteEvent = SReplicatedStorage:FindFirstChild("RemoteEvent")
+        or SReplicatedStorage:WaitForChild("RemoteEvent", 10)
+    if not RemoteEvent then
+        return false, "RemoteEvent not found."
+    end
+
+    local INV = {
+        enabled    = true,
+        equippedH  = nil,
+        equippedG  = nil,
+        savedLight = nil,
+        allItems   = nil,
+        debug      = false,
+    }
+
+    local RAINBOW_IDS = { ["G0021"] = true, ["Gani0076"] = true }
+    local RAINBOW_COLORS = {
+        Color3.fromRGB(255, 0,   0),
+        Color3.fromRGB(255, 170, 0),
+        Color3.fromRGB(255, 255, 0),
+        Color3.fromRGB(0,   255, 0),
+        Color3.fromRGB(0,   0,   255),
+        Color3.fromRGB(170, 0,   255),
+    }
+    local rainbowIdx   = 1
+    local activeTweens = {}
+
+    local function INV_Log(...)
+        if INV.debug then warn("[INV]", ...) end
+    end
+
+    local function INV_GetChar()
+        LPC = LP.Character or LP.CharacterAdded:Wait()
+        return LPC
+    end
+
+    local function INV_IsHammer(id)
+        return type(id) == "string" and id:sub(1,1) == "H"
+    end
+
+    local function INV_IsGemstone(id)
+        return type(id) == "string" and id:sub(1,1) == "G"
+    end
+
+    local function INV_IsBeast()
+        local stats = LP:FindFirstChild("TempPlayerStatsModule")
+        if not stats then return false end
+        local v = stats:FindFirstChild("IsBeast")
+        return v and v:IsA("BoolValue") and v.Value == true
+    end
+
+    local _db = nil
+    local function INV_DB()
+        if _db then return _db end
+        local ok, db = pcall(function()
+            return require(SReplicatedStorage:WaitForChild("ItemDatabaseTable", 8))
+        end)
+        _db = ok and db or nil
+        return _db
+    end
+
+    local function INV_BuildList()
+        if INV.allItems then return INV.allItems end
+        local db = INV_DB()
+        if not db then return {} end
+        local list = {}
+        for id in pairs(db) do
+            if type(id) == "string" and (INV_IsHammer(id) or INV_IsGemstone(id)) then
+                table.insert(list, id)
+            end
+        end
+        table.sort(list)
+        INV.allItems = list
+        return list
+    end
+
+    local function INV_GetTorso(char)
+        return char:FindFirstChild("Torso")
+            or char:FindFirstChild("UpperTorso")
+            or char:FindFirstChild("HumanoidRootPart")
+    end
+
+    local function INV_PrepPart(p)
+        if not p or not p:IsA("BasePart") then return end
+        p.Anchored = false; p.CanCollide = false; p.CanTouch = false; p.CanQuery = false; p.Massless = true
+    end
+
+    local function INV_ClearVisual(container)
+        if not container then return end
+        local old = container:FindFirstChild("__V")
+        if old then old:Destroy() end
+        for _, item in ipairs(container:GetChildren()) do
+            if item.Name ~= "Handle" and item.Name ~= "ClubScript" and item.Name ~= "LocalClubScript"
+            and item.Name ~= "HammerEvent" and item.Name ~= "AnimSwing" and item.Name ~= "AnimWipe"
+            and item.Name ~= "AnimArmIdle" and item.Name ~= "SelfDestroy" then
+                if item:IsA("BasePart") or item:IsA("MeshPart") or item:IsA("SpecialMesh")
+                or item:IsA("Model") or item:IsA("Accessory") then
+                    pcall(function() item:Destroy() end)
+                end
+            end
+        end
+        local handle = container:FindFirstChild("Handle") or container:FindFirstChildWhichIsA("BasePart")
+        if handle then
+            handle.Transparency = 1
+            for _, child in ipairs(handle:GetChildren()) do
+                if child:IsA("SpecialMesh") or child:IsA("BlockMesh") or child:IsA("Texture")
+                or child:IsA("Decal") or child:IsA("Light") then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+
+    local function INV_ClearWelds(handle)
+        for _, w in ipairs(handle:GetChildren()) do
+            if w:IsA("Weld") or w:IsA("ManualWeld") or w:IsA("Motor6D") then w:Destroy() end
+        end
+    end
+
+    local function INV_Weld(handle, p0, p1, c0, c1, name)
+        INV_ClearWelds(handle)
+        local w = Instance.new("Weld")
+        w.Name = name or "AccessoryWeld"
+        w.Part0 = p0; w.Part1 = p1; w.C0 = c0; w.C1 = c1; w.Parent = handle
+        return w
+    end
+
+    local function INV_GetSource(itemId, isBeastMode)
+        local db = SReplicatedStorage:FindFirstChild("ItemDatabase")
+        if not db then return nil end
+        local folder = db:FindFirstChild(itemId)
+        if not folder then return nil end
+        if itemId == "Hspr0030" and not isBeastMode
+        and (_G.CurrentHammerStyle == "Hip" or _G.CurrentHammerStyle == "Waist") then
+            local alt = folder:FindFirstChild("AccessoryModel1") or folder:FindFirstChild("Model1")
+            if alt then return alt end
+        end
+        return folder:FindFirstChild("AccessoryModel")
+            or folder:FindFirstChild("Model")
+            or folder:FindFirstChildWhichIsA("Accessory")
+            or folder:FindFirstChildWhichIsA("Model")
+            or folder:FindFirstChildWhichIsA("BasePart")
+    end
+
+    local function INV_InjectVisual(itemId, container, handle, isBeastMode)
+        INV_ClearVisual(container)
+        local source = INV_GetSource(itemId, isBeastMode)
+        if not source then return false end
+        local folder = Instance.new("Folder"); folder.Name = "__V"; folder.Parent = container
+        local srcRoot = (source:IsA("BasePart") and source)
+            or source:FindFirstChild("Handle", true)
+            or source:FindFirstChildWhichIsA("MeshPart", true)
+            or source:FindFirstChildWhichIsA("BasePart", true)
+        if not srcRoot then folder:Destroy(); return false end
+
+        local function clonePart(srcPart)
+            if not srcPart:IsA("BasePart") then return end
+            local clone = srcPart:Clone(); clone.Name = "__P_"..srcPart.Name
+            for _, d in ipairs(clone:GetDescendants()) do
+                if d:IsA("Script") or d:IsA("LocalScript") or d:IsA("ModuleScript")
+                or d:IsA("Weld") or d:IsA("ManualWeld") or d:IsA("Motor6D")
+                or d:IsA("WeldConstraint") or d:IsA("TouchTransmitter") then
+                    pcall(function() d:Destroy() end)
+                end
+            end
+            INV_PrepPart(clone)
+            clone.Transparency = srcPart.Transparency
+            pcall(function() clone.LocalTransparencyModifier = srcPart.LocalTransparencyModifier end)
+            clone.Parent = folder
+            clone.CFrame = handle.CFrame * srcRoot.CFrame:ToObjectSpace(srcPart.CFrame)
+            local wc = Instance.new("WeldConstraint"); wc.Part0 = handle; wc.Part1 = clone; wc.Parent = clone
+        end
+
+        if source:IsA("BasePart") then
+            clonePart(source)
+        else
+            clonePart(srcRoot)
+            for _, d in ipairs(source:GetDescendants()) do
+                if d:IsA("BasePart") and d ~= srcRoot then clonePart(d) end
+            end
+        end
+
+        if isBeastMode then
+            local tl = source:FindFirstChildWhichIsA("Light", true) or INV.savedLight
+            if tl then
+                local lc = tl:Clone(); lc.Enabled = true; lc.Parent = handle
+                if RAINBOW_IDS[itemId] then lc.Name = "__RainbowLight" end
+            end
+        end
+
+        for _, d in ipairs(folder:GetDescendants()) do
+            if d:IsA("ParticleEmitter") or d:IsA("Trail") or d:IsA("Beam")
+            or d:IsA("PointLight") or d:IsA("SpotLight") or d:IsA("SurfaceLight") then
+                pcall(function() d.Enabled = isBeastMode end)
+            end
+        end
+        return true
+    end
+
+    local function INV_GetRarityColor(rarity)
+        if     rarity == 1 then return Color3.fromRGB(0,   255, 0)
+        elseif rarity == 2 then return Color3.fromRGB(0,   255, 255)
+        elseif rarity == 3 then return Color3.fromRGB(255, 0,   255)
+        elseif rarity == 4 then return Color3.fromRGB(255, 255, 0)
+        elseif rarity == 5 then return Color3.fromRGB(255, 170, 0)
+        else                     return Color3.fromRGB(255, 255, 255) end
+    end
+
+    local _EventIconModule = nil
+    local function INV_GetEventIconModule()
+        if _EventIconModule then return _EventIconModule end
+        local ok, m = pcall(function()
+            return require(SReplicatedStorage:WaitForChild("EventIconModule", 3))
+        end)
+        if ok then _EventIconModule = m end
+        return _EventIconModule
+    end
+
+    local function INV_UpdateInventoryUI(itemId, isHammer)
+        local db = INV_DB()
+        if not db or not db[itemId] then return end
+        local entry = db[itemId]
+
+        local PlayerGui = LP:FindFirstChild("PlayerGui")
+        if not PlayerGui then return end
+        local menuGui = PlayerGui:FindFirstChild("MenusScreenGui")
+        if not menuGui then return end
+        local window = menuGui:FindFirstChild("InventoryMenuWindow")
+        if not window or not window.Visible then return end
+        local body = window:FindFirstChild("Body")
+        if not body then return end
+
+        local slotName = isHammer and "CurrentHammer" or "CurrentGemstone"
+        local slot = body:FindFirstChild(slotName)
+        if not slot then return end
+
+        local thumb = entry:GetAttribute("Thumbnail")
+        if thumb then pcall(function() slot.Image = thumb end) end
+
+        local bottomLabel = slot:FindFirstChild("BottomLabel")
+        if bottomLabel then
+            local ok2, LocalizationModule = pcall(function()
+                return require(LP.PlayerGui:WaitForChild("LocalizationModule", 3))
+            end)
+            if ok2 and LocalizationModule then
+                pcall(function() LocalizationModule.TranslateItemNameTextLabel(itemId, bottomLabel) end)
+            else
+                local name = entry:GetAttribute("Name") or itemId
+                pcall(function() bottomLabel.Text = name end)
+            end
+            local rarity = entry:GetAttribute("Rarity")
+            pcall(function() bottomLabel.TextColor3 = INV_GetRarityColor(rarity) end)
+        end
+
+        local eventIcon = slot:FindFirstChild("EventIcon")
+        if eventIcon then
+            local eim = INV_GetEventIconModule()
+            if eim then
+                pcall(function() eventIcon.Image = eim.GetEventIconFromItemId(itemId) end)
+            end
+        end
+
+        INV_Log("UI thumbnail updated →", slotName, itemId)
+    end
+
+    local _uiBusy = false
+    local function INV_FakeEquipResponse(isHammer, itemId)
+        if type(getconnections) ~= "function" then return end
+        local action = isHammer and "GetPlayerCurrentHammer" or "GetPlayerCurrentGemstone"
+        task.defer(function()
+            local ok, cs = pcall(getconnections, RemoteEvent.OnClientEvent)
+            if not (ok and cs) then return end
+            _uiBusy = true
+            for _, c in ipairs(cs) do pcall(c.Fire, c, action, itemId) end
+            _uiBusy = false
+        end)
+    end
+
+    local function INV_EquipHammer(itemId)
+        if not INV_IsHammer(itemId) then return false end
+        INV.equippedH = itemId
+        task.spawn(function() INV_UpdateInventoryUI(itemId, true) end)
+        INV_FakeEquipResponse(true, itemId)
+        if not INV_IsBeast() then
+            local char  = INV_GetChar()
+            local torso = INV_GetTorso(char)
+            if not torso then return false end
+            local acc = char:FindFirstChild("PackedHammer")
+            if not acc then
+                acc = Instance.new("Accessory"); acc.Name="PackedHammer"; acc.Parent=char
+            end
+            local handle = acc:FindFirstChild("Handle") or Instance.new("Part")
+            if not handle.Parent then
+                handle.Name="Handle"; handle.Size=Vector3.new(0.5,0.5,0.5)
+                handle.Transparency=1; handle.Parent=acc
+            end
+            INV_PrepPart(handle)
+            local c0, c1 = HAMMER_BACK_C0, HAMMER_BACK_C1
+            if _G.CurrentHammerStyle == "Hip" or _G.CurrentHammerStyle == "Waist" then
+                c0, c1 = HAMMER_HIP_C0, HAMMER_HIP_C1
+            end
+            INV_Weld(handle, handle, torso, c0, c1, "AccessoryWeld")
+            INV_InjectVisual(itemId, acc, handle, false)
+        end
+        return true
+    end
+
+    local function INV_EquipGemstone(itemId)
+        if not INV_IsGemstone(itemId) then return false end
+        INV.equippedG = itemId
+        task.spawn(function() INV_UpdateInventoryUI(itemId, false) end)
+        INV_FakeEquipResponse(false, itemId)
+        local dbf = SReplicatedStorage:FindFirstChild("ItemDatabase")
+            and SReplicatedStorage.ItemDatabase:FindFirstChild(itemId)
+        if dbf then
+            local dl = dbf:FindFirstChildWhichIsA("Light", true)
+            if dl then INV.savedLight = dl end
+        end
+        if not INV_IsBeast() then
+            local char  = INV_GetChar()
+            local torso = INV_GetTorso(char)
+            if not torso then return false end
+            local ng = char:FindFirstChild("Gemstone")
+            if ng then INV_ClearVisual(ng) end
+            local acc = char:FindFirstChild("PackedGemstone") or Instance.new("Accessory")
+            acc.Name="PackedGemstone"; acc.Parent=char
+            local handle = acc:FindFirstChild("Handle") or Instance.new("Part")
+            if not handle.Parent then
+                handle.Name="Handle"; handle.Size=Vector3.new(1,0.5,1)
+                handle.Transparency=1; handle.Parent=acc
+            end
+            INV_PrepPart(handle)
+            local c0, c1 = GEM_BACK_C0, GEM_BACK_C1
+            if _G.CurrentGemStyle == "Hip" or _G.CurrentGemStyle == "Waist" then
+                c0, c1 = GEM_HIP_C0, GEM_HIP_C1
+            end
+            INV_Weld(handle, handle, torso, c0, c1, "AccessoryWeld")
+            INV_InjectVisual(itemId, acc, handle, false)
+        end
+        return true
+    end
+
+    local function INV_Equip(itemId)
+        if not itemId then return false end
+        if INV_IsHammer(itemId)   then return INV_EquipHammer(itemId)   end
+        if INV_IsGemstone(itemId) then return INV_EquipGemstone(itemId) end
+        return false
+    end
+
+    local function INV_Reapply()
+        if INV.equippedH then INV_EquipHammer(INV.equippedH) end
+        if INV.equippedG then INV_EquipGemstone(INV.equippedG) end
+    end
+
+    LP.CharacterAdded:Connect(function(c)
+        LPC = c; task.wait(0.5); INV_Reapply()
+    end)
+
+    if RemoteEvent and type(hookmetamethod) == "function" then
+        local _oldNC
+        _oldNC = hookmetamethod(game, "__namecall", function(self, ...)
+            local method = getnamecallmethod()
+
+            if self == RemoteEvent and method == "FireServer" then
+                local args   = {...}
+                local action = args[1]
+
+                if INV.enabled then
+                    if action == "ChangePlayerCurrentHammer" and args[2] then
+                        INV_EquipHammer(args[2])
+                        return
+                    elseif action == "ChangePlayerCurrentGemstone" and args[2] then
+                        INV_EquipGemstone(args[2])
+                        return
+                    end
+                end
+
+                if action == "CycleHammerAttachmentStyle" then
+                    _G.CurrentHammerStyle = (_G.CurrentHammerStyle == "Back") and "Hip" or "Back"
+                    task.spawn(INV_Reapply)
+                    for _, gui in ipairs(LP.PlayerGui:GetChildren()) do
+                        if gui:IsA("ScreenGui") and gui.Enabled then
+                            local btn = gui:FindFirstChild("HammerAttachmentStyleButton", true)
+                            if btn then btn.Text = _G.CurrentHammerStyle end
+                        end
+                    end
+                    return
+                elseif action == "CycleGemAttachmentStyle" then
+                    _G.CurrentGemStyle = (_G.CurrentGemStyle == "Back") and "Hip" or "Back"
+                    task.spawn(INV_Reapply)
+                    for _, gui in ipairs(LP.PlayerGui:GetChildren()) do
+                        if gui:IsA("ScreenGui") and gui.Enabled then
+                            local btn = gui:FindFirstChild("GemstoneAttachmentStyleButton", true)
+                            if btn then btn.Text = _G.CurrentGemStyle end
+                        end
+                    end
+                    return
+                elseif action == "GetAttachmentStyles" then
+                    return
+                end
+            end
+
+            return _oldNC(self, ...)
+        end)
+
+        INV_Log("Hook active (sync, single hookmetamethod).")
+    end
+
+    if RemoteEvent and type(getconnections) == "function" then
+        local _invBusy = false
+
+        RemoteEvent.OnClientEvent:Connect(function(action, ...)
+            if _invBusy or _uiBusy then return end
+            if not INV.enabled then return end
+
+            if action == "GetPlayerInventory" then
+                local items = INV_BuildList()
+                local fake  = {}
+                for _, id in ipairs(items) do
+                    for _ = 1, 10 do table.insert(fake, id) end
+                end
+                table.sort(fake)
+                task.defer(function()
+                    local ok, cs = pcall(getconnections, RemoteEvent.OnClientEvent)
+                    if not (ok and cs) then return end
+                    _invBusy = true
+                    for _, c in ipairs(cs) do pcall(c.Fire, c, "GetPlayerInventory", fake) end
+                    _invBusy = false
+                end)
+            end
+        end)
+
+        INV_Log("Fake inventory listener active.")
+    elseif RemoteEvent then
+        warn("[INV] getconnections unavailable — inventory fake disabled.")
+    end
+
+    if RemoteEvent then
+        RemoteEvent.OnClientEvent:Connect(function(action, ...)
+            if _uiBusy then return end
+            local args = {...}
+            if action == "GetPlayerCurrentHammer" then
+                local id = (INV.enabled and INV.equippedH) or args[1]
+                if id then INV_EquipHammer(id) end
+            elseif action == "GetPlayerCurrentGemstone" then
+                local id = (INV.enabled and INV.equippedG) or args[1]
+                if id then INV_EquipGemstone(id) end
+            elseif action == "EquipHammer"   and args[1] then INV_EquipHammer(args[1])
+            elseif action == "EquipGemstone" and args[1] then INV_EquipGemstone(args[1])
+            elseif action == "EquipItem"     and args[1] then INV_Equip(args[1])
+            end
+        end)
+    end
+
+    task.spawn(function()
+        while task.wait(0.25) do
+            if INV_IsBeast() then
+                local char = LP.Character
+                if char and char.Parent == SWorkspace then
+                    local hm = char:FindFirstChild("Hammer")
+                    if hm and hm:IsA("Model") and INV.equippedH and not hm:FindFirstChild("__V") then
+                        local th = hm:FindFirstChild("Handle") or hm:FindFirstChildWhichIsA("BasePart", true)
+                        if th then INV_InjectVisual(INV.equippedH, hm, th, true) end
+                    end
+                    local gm = char:FindFirstChild("Gemstone")
+                    if gm and (gm:IsA("Accessory") or gm:IsA("Model")) and INV.equippedG and not gm:FindFirstChild("__V") then
+                        local th = gm:FindFirstChild("Handle") or gm:FindFirstChildWhichIsA("BasePart", true)
+                        if th then
+                            for _, d in ipairs(gm:GetDescendants()) do
+                                if d:IsA("Light") then pcall(function() d:Destroy() end) end
+                            end
+                            INV_InjectVisual(INV.equippedG, gm, th, true)
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    task.spawn(function()
+        while task.wait(1) do
+            if INV_IsBeast() then
+                local nextColor = RAINBOW_COLORS[rainbowIdx]
+                local char = LP.Character
+                if char and char.Parent == SWorkspace then
+                    for _, container in ipairs({ char:FindFirstChild("Gemstone"), char:FindFirstChild("Hammer") }) do
+                        if container then
+                            for _, obj in ipairs(container:GetDescendants()) do
+                                if obj:IsA("PointLight") and (obj.Name == "__RainbowLight" or RAINBOW_IDS[INV.equippedG]) then
+                                    if activeTweens[obj] then activeTweens[obj]:Cancel() end
+                                    local tw = STweenService:Create(obj, TweenInfo.new(1), {Color = nextColor})
+                                    activeTweens[obj] = tw; tw:Play()
+                                end
+                            end
+                        end
+                    end
+                end
+                rainbowIdx = rainbowIdx % #RAINBOW_COLORS + 1
+            end
+        end
+    end)
+
+    task.spawn(function()
+        local ItemDatabase = SReplicatedStorage:WaitForChild("ItemDatabase", 10)
+        if ItemDatabase then
+            for _, folder in ipairs(ItemDatabase:GetChildren()) do
+                if not folder:FindFirstChild("AccessoryModel1") then
+                    local d = Instance.new("Folder"); d.Name="AccessoryModel1"; d.Parent=folder
+                end
+            end
+            INV_Log("Database configurations initialized.")
+        end
+    end)
+
+    _G.INV_Equip         = INV_Equip
+    _G.INV_EquipHammer   = INV_EquipHammer
+    _G.INV_EquipGemstone = INV_EquipGemstone
+    _G.INV_Reapply       = INV_Reapply
+    _G.INV_BuildList     = INV_BuildList
+    _G.INV_IsBeast       = INV_IsBeast
+
+    task.defer(function()
+        local items = INV_BuildList()
+        local h, g  = 0, 0
+        for _, id in ipairs(items) do
+            if INV_IsHammer(id) then h=h+1 else g=g+1 end
+        end
+        warn(("[INV] Ready! %d hammers + %d gems. Spoof + Equip active."):format(h, g))
+    end)
+
+    return true, "Inventory Spoof activated."
+end
+
+miscPage:Section("Inventory")
+
+miscPage:Button({
+    Title = "Inventory Spoof",
+    Desc  = "One-time activate local inventory spoof visuals.",
+    Text  = "Activate",
+    Callback = function()
+        local ok, msg = InventorySpoof_Activate()
+        if ok then
+            Library:Notification({
+                Title = "Inventory Spoof",
+                Desc = msg or "Activated.",
+                Duration = 4,
+                Type = "Success",
+            })
+        else
+            Library:Notification({
+                Title = "Inventory Spoof",
+                Desc = msg or "Failed to activate.",
+                Duration = 4,
+                Type = "Warning",
+            })
+        end
+    end,
+})
+
 toggleHandles.antierror = miscPage:Toggle({
     Title = "Anti-Error",
     Desc  = "Force success on minigame results",
